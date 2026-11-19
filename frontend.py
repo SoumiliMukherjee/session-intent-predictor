@@ -1,13 +1,36 @@
-import requests
+import joblib
+import pandas as pd
 import streamlit as st
+import torch
+from model import LstmModel
 
-st.set_page_config(page_title='Purchase Intent Predictor' , layout='centered')
-st.title('Online Shopper Purchase Intent Predictor')
-st.markdown("Dual-Stream PyTorch **LSTM + ANN** served via **FastAPI**")
+st.set_page_config(page_title="Purchase Intent Predictor", layout="centered")
+st.title("Online Shopper Purchase Intent Predictor")
+st.markdown("Dual-Stream PyTorch **LSTM + ANN** | **0.949 Validation ROC-AUC**")
 
-with st.form('session-form'):
-    st.subheader('1. Browsing Funnel Activity (Sequence Stream)')
-    col1 , col2 = st.columns(2)
+SEQ_COLS = [
+    "Administrative", "Administrative_Duration",
+    "Informational", "Informational_Duration",
+    "ProductRelated", "ProductRelated_Duration"
+]
+
+@st.cache_resource
+def load_artifacts():
+    device = torch.device("cpu")
+    seq_scaler = joblib.load("artifacts/seq_scaler.joblib")
+    context_transformer = joblib.load("artifacts/context_transformer.joblib")
+    checkpoint = torch.load("artifacts/session_intent_lstm.pt", map_location=device, weights_only=True)
+
+    model = LstmModel(**checkpoint["hyperparameteres"]).to(device)
+    model.load_state_dict(checkpoint["moedel_state_dict"])
+    model.eval()
+    return model, seq_scaler, context_transformer
+
+model, seq_scaler, context_transformer = load_artifacts()
+
+with st.form("session_form"):
+    st.subheader("1. Browsing Funnel Activity (Sequence Stream)")
+    col1, col2 = st.columns(2)
     with col1:
         admin_pages = st.number_input("Administrative Pages", min_value=0, value=2)
         info_pages = st.number_input("Informational Pages", min_value=0, value=1)
@@ -16,8 +39,9 @@ with st.form('session-form'):
         admin_dur = st.number_input("Administrative Duration (sec)", min_value=0.0, value=45.0)
         info_dur = st.number_input("Informational Duration (sec)", min_value=0.0, value=12.5)
         prod_dur = st.number_input("Product Related Duration (sec)", min_value=0.0, value=640.0)
+
     st.subheader("2. Session Metrics & Visitor Context (Context Stream)")
-    col3 , col4 = st.columns(2)
+    col3, col4 = st.columns(2)
     with col3:
         bounce_rate = st.slider("Bounce Rate", 0.0, 0.2, 0.01, step=0.005)
         exit_rate = st.slider("Exit Rate", 0.0, 0.2, 0.025, step=0.005)
@@ -28,9 +52,11 @@ with st.form('session-form'):
         visitor_type = st.selectbox("Visitor Type", ["Returning_Visitor", "New_Visitor", "Other"])
         weekend = st.checkbox("Weekend Session", value=False)
         traffic_type = st.number_input("Traffic Type ID", min_value=1, max_value=20, value=2)
-    submitted = st.form_submit_button('Predict Purchase Intent' , use_container_width=True)
+
+    submitted = st.form_submit_button("Predict Purchase Intent", use_container_width=True)
+
 if submitted:
-    payload = {
+    row = pd.DataFrame([{
         "Administrative": admin_pages,
         "Administrative_Duration": admin_dur,
         "Informational": info_pages,
@@ -48,17 +74,21 @@ if submitted:
         "TrafficType": traffic_type,
         "VisitorType": visitor_type,
         "Weekend": weekend
-    }
-    try:
-        response = requests.post('http://127.0.0.1:8000/predict' , json=payload)
-        response.raise_for_status()
-        result = response.json()
-        prob = result['purchase_probability']
-        st.divider()
-        if result['predicted_intent'] == 'Purchase':
-            st.success(f"**High Purchase Intent** — Conversion Probability: **{prob * 100:.1f}%**")
-        else:
-            st.warning(f"**Likely Drop-off** — Conversion Probability: **{prob * 100:.1f}%**")
-    except requests.exceptions.ConnectionError:
-        st.error("Cannot reach FastAPI. Keep `uvicorn app:app --reload` running in Terminal 1.")
-        
+    }])
+
+    seq_scaled = seq_scaler.transform(row[SEQ_COLS]).reshape(1, 3, 2)
+    ctx_encoded = context_transformer.transform(row)
+
+    with torch.no_grad():
+        prob = torch.sigmoid(
+            model(
+                torch.tensor(seq_scaled, dtype=torch.float32),
+                torch.tensor(ctx_encoded, dtype=torch.float32)
+            )
+        ).item()
+
+    st.divider()
+    if prob >= 0.5:
+        st.success(f"**High Purchase Intent** — Conversion Probability: **{prob * 100:.1f}%**")
+    else:
+        st.warning(f"**Likely Drop-off** — Conversion Probability: **{prob * 100:.1f}%**")
