@@ -22,7 +22,7 @@ def load_artifacts():
     checkpoint = torch.load("artifacts/session_intent_lstm.pt", map_location=device, weights_only=True)
 
     model = LstmModel(**checkpoint["hyperparameteres"]).to(device)
-    model.load_state_dict(checkpoint["moedel_state_dict"])
+    model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model, seq_scaler, context_transformer
 
